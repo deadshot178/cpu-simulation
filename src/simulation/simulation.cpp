@@ -1,12 +1,13 @@
+#include "simulation/simulation.hpp"
+
 #include <fstream>
 #include <iostream>
 
 #include "algorithms/fcfs/fcfs_algorithm.hpp"
-// TODO: Include your other algorithms as you make them
-
-#include "simulation/simulation.hpp"
+#include "algorithms/priority/priority_algorithm.hpp"
+#include "algorithms/rr/rr_algorithm.hpp"
+#include "algorithms/spn/spn_algorithm.hpp"
 #include "types/enums.hpp"
-
 #include "utilities/flags/flags.hpp"
 
 Simulation::Simulation(FlagOptions flags) {
@@ -15,9 +16,17 @@ Simulation::Simulation(FlagOptions flags) {
         // Create a FCFS scheduling algorithm
         this->scheduler = std::make_shared<FCFSScheduler>();
 
-    // TODO: Add your other algorithms as you make them
-    } else {
-        throw("No scheduler found for " + flags.scheduler);        
+        // TODO: Add your other algorithms as you make them
+    } else if (flags.scheduler == "SPN") {
+        this->scheduler = std::make_shared<SPNScheduler>();
+    } else if (flags.scheduler == "RR") {
+        this->scheduler = std::make_shared<RRScheduler>(flags.time_slice);
+    } else if (flags.scheduler == "PRIORITY") {
+        this->scheduler = std::make_shared<PRIORITYScheduler>(flags.time_slice);
+    }
+
+    else {
+        throw("No scheduler found for " + flags.scheduler);
     }
     this->flags = flags;
     this->logger = Logger(flags.verbose, flags.per_thread, flags.metrics);
@@ -25,14 +34,14 @@ Simulation::Simulation(FlagOptions flags) {
 
 void Simulation::run() {
     this->read_file(this->flags.filename);
-    
+
     while (!this->events.empty()) {
         auto event = this->events.top();
         this->events.pop();
 
         // Invoke the appropriate method in the simulation for the given event type.
 
-        switch(event->type) {
+        switch (event->type) {
             case THREAD_ARRIVED:
                 this->handle_thread_arrived(event);
                 break;
@@ -76,7 +85,7 @@ void Simulation::run() {
 
     std::cout << "SIMULATION COMPLETED!\n\n";
 
-    for (auto entry: this->processes) {
+    for (auto entry : this->processes) {
         this->logger.print_per_thread_metrics(entry.second);
     }
 
@@ -102,12 +111,12 @@ void Simulation::handle_thread_arrived(const std::shared_ptr<Event> event) {
 void Simulation::handle_dispatch_completed(const std::shared_ptr<Event> event) {
     event->thread->set_running(event->time);
 
-    /* 
+    /*
     Determine the appropriate next even and generate it as adequate
         - If the next CPU burst is > than the quantum generate a thread Premted event
         - Otherwise pop the CPU burst from the queue and determine if there is an I/O burst avaliable
             - If yes next event is an CPU Burst Complete
-            - If no next event is a Thread Complete 
+            - If no next event is a Thread Complete
     */
     std::shared_ptr<Event> new_event = nullptr;
     if (scheduler->time_slice == -1 || event->thread->get_next_burst(CPU)->length <= scheduler->time_slice) {
@@ -151,7 +160,7 @@ void Simulation::handle_io_burst_completed(const std::shared_ptr<Event> event) {
 
 void Simulation::handle_thread_completed(const std::shared_ptr<Event> event) {
     event->thread->set_finished(event->time);
-        
+
     // Just finished using the CPU, run the scheduler!
     auto new_event = Event(DISPATCHER_INVOKED, event->time, event_num++, nullptr, nullptr);
     add_event(std::make_shared<Event>(new_event));
@@ -191,31 +200,72 @@ void Simulation::handle_dispatcher_invoked(const std::shared_ptr<Event> event) {
         // always add to the queue
         add_event(new_event);
     } else {
-
         // No threads in the ready queue ==> no threads to be scheduled
-        // Thus, the CPU will become _idle_ 
+        // Thus, the CPU will become _idle_
         active_thread = nullptr;
         return;
     }
 }
 
-
 //==============================================================================
 // Utility methods
 //==============================================================================
+// SystemStats Simulation::calculate_statistics() {
+//     // Number of Threads per Process Priority
+//     for (auto& proc : this->processes) {
+//         for (auto& thread : proc.second->threads) {
+//             // Update the statistics based on the thread's data
+//             this->system_stats.thread_counts[proc.second->priority]++;
+//             this->system_stats.avg_thread_turnaround_times[proc.second->priority] += thread->turnaround_time();
+//             this->system_stats.avg_thread_response_times[proc.second->priority] += thread->response_time();
+//             this->system_stats.total_service_time += thread->service_time;
+//             this->system_stats.total_io_time += thread->io_time;
+//         }
+//     }
 
+//     // Calculate averages and totals
+//     for (int i = 0; i < 4; i++) {
+//         this->system_stats.avg_thread_turnaround_times[i] /= this->system_stats.thread_counts[i];
+//         this->system_stats.avg_thread_response_times[i] /= this->system_stats.thread_counts[i];
+//     }
+//     this->system_stats.total_idle_time = this->total_time - this->system_stats.total_service_time - this->system_stats.total_io_time;
+//     this->system_stats.cpu_utilization = ((this->total_time - this->system_stats.total_idle_time) / (double)this->total_time) * 100;
+//     this->system_stats.cpu_efficiency = (this->system_stats.total_service_time / (double)this->total_time) * 100;
+
+//     return this->system_stats;
+// }
 SystemStats Simulation::calculate_statistics() {
-    /*
-        TODO: Calculate the following system statistics:
-            - thread_counts[4]
-            - avg_thread_response_times[4]
-            - avg_thread_turnaround_times[4]
-            - total_service_time
-            - total_io_time
-            - total_idle_time
-            - cpu_utilization
-            - cpu_efficiency  
-    */
+    for (auto& pair : processes) {
+        auto& proc = pair.second;
+        for (auto& thread : proc->threads) {  // loop through each thread of each process
+            size_t pindex = static_cast<size_t>(thread->priority);
+            system_stats.thread_counts[pindex]++;
+
+            // Response and turnaround
+            system_stats.avg_thread_response_times[pindex] += thread->response_time();
+            system_stats.avg_thread_turnaround_times[pindex] += thread->turnaround_time();
+
+            // total service and io time
+            system_stats.total_service_time += thread->service_time;
+            system_stats.total_io_time += thread->io_time;
+        }
+    }
+    // Calculate averages res time and turnaround for each priority
+    for (int i = 0; i < 4; i++) {
+        if (system_stats.thread_counts[i] > 0) {
+            system_stats.avg_thread_response_times[i] /= system_stats.thread_counts[i];
+            system_stats.avg_thread_turnaround_times[i] /= system_stats.thread_counts[i];
+        }
+    }
+
+    // Total idle time
+    system_stats.total_idle_time = system_stats.total_time - system_stats.total_service_time - system_stats.dispatch_time;
+
+    //  utilization and efficiency
+    system_stats.cpu_utilization = (system_stats.total_time > 0) ? 100.0 * (system_stats.total_time - system_stats.total_idle_time) / system_stats.total_time : 0;
+
+    system_stats.cpu_efficiency = (system_stats.total_time > 0) ? 100.0 * system_stats.total_service_time / system_stats.total_time : 0;
+
     return this->system_stats;
 }
 
@@ -250,11 +300,11 @@ std::shared_ptr<Process> Simulation::read_process(std::istream& input) {
 
     input >> process_id >> priority >> num_threads;
 
-    auto process = std::make_shared<Process>(process_id, (ProcessPriority) priority);
+    auto process = std::make_shared<Process>(process_id, (ProcessPriority)priority);
 
     // iterate over the threads
     for (int thread_id = 0; thread_id < num_threads; ++thread_id) {
-        process->threads.emplace_back(read_thread(input, thread_id, process_id, (ProcessPriority) priority));
+        process->threads.emplace_back(read_thread(input, thread_id, process_id, (ProcessPriority)priority));
     }
 
     return process;
